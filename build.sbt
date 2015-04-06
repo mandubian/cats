@@ -134,7 +134,7 @@ lazy val data = project.dependsOn(macros, core)
   .settings(moduleName := "cats-data")
   .settings(catsSettings)
 
-lazy val free = project.dependsOn(macros, core)
+lazy val free = project.dependsOn(macros, core, std)
   .settings(moduleName := "cats-free")
   .settings(catsSettings)
 

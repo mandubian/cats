@@ -25,9 +25,39 @@ object Free {
       val f = f0
     }
 
+
+
+  implicit def FreeMonad[S[_]] = new Monad[({ type l[A] = Free[S, A] })#l] {
+    def pure[A](a: A): Free[S, A] = Free.Pure(a)
+    def flatMap[A, B](fa: Free[S, A])(f: A => Free[S, B]): Free[S, B] = fa.flatMap(f)
+  }
+
+
   /** Suspends a value within a functor lifting it to a Free */
   def liftF[F[_], A](value: => F[A])(implicit F: Functor[F]): Free[F, A] =
     Suspend(F.map(value)(Pure[F, A]))
+
+
+  import cats.std.function._
+  type Trampoline[A] = Free[Function0, A]
+
+  object Trampoline {
+
+    def done[A](a: A): Trampoline[A] = Pure[Function0, A](a)
+
+    def suspend[A](a: => Trampoline[A]): Trampoline[A] = Suspend(() => a)
+
+    def delay[A](a: => A): Trampoline[A] = suspend(done(a))
+
+  }
+
+  implicit class TrampolineOps[A](val tr: Trampoline[A]) {
+    /** Runs a trampoline all the way to the end, tail-recursively. */
+    def run: A = {
+      tr.go(_())
+    }
+  }
+
 }
 
 import Free._
