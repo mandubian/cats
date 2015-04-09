@@ -13,13 +13,15 @@ object FreeView {
 
 import FreeR._
 
-case class FreeR[S[_], A] private(head: FreeView[S, Val], tail: Ops = Vector.empty) {
+sealed abstract class FreeR[S[_], A] {
   import Op._
   import Val._
   import FreeView._
 
   def map[B](f: A => B) = FreeR.map(this)(f)
   def flatMap[B](f: A => FreeR[S, B]) = FreeR.bind(this)(f)
+
+  def toView(implicit S: Functor[S]): FreeView[S, A] = FreeR.toView(this)
 
   final def resume(implicit S: Functor[S]): (Either[S[FreeR[S, A]], A]) = FreeR.toView(this) match {
     case Pure(a) => Right(reify[A](a))
@@ -77,6 +79,8 @@ case class FreeR[S[_], A] private(head: FreeView[S, Val], tail: Ops = Vector.emp
     }
 
   final def compile[T[_]](f: S ~> T)(implicit S: Functor[S], T: Functor[T]): FreeR[T, A] = mapSuspension(f)
+
+  final def mapFusion(implicit fs: Functor[S]): FreeR[S, A] = FreeR.mapFusion(this)
 }
 
 object FreeR {
@@ -84,56 +88,136 @@ object FreeR {
   import Op._
   import Val._
 
+  case class FreeR0[S[_], A](head: FreeView[S, Val]) extends FreeR[S, A]
+  case class FreeR1[S[_], A](head: FreeView[S, Val], op: Op) extends FreeR[S, A]
+  case class FreeRs[S[_], A](head: FreeView[S, Val], ops: Ops = Vector.empty) extends FreeR[S, A]
+
   implicit def FreeRMonad[S[_]] = new Monad[({ type l[A] = FreeR[S, A] })#l] {
     def pure[A](a: A): FreeR[S, A] = FreeR.pure(a)
     def flatMap[A, B](fa: FreeR[S, A])(f: A => FreeR[S, B]): FreeR[S, B] = FreeR.bind(fa)(f)
   }
 
-  final def pure[S[_], A](a: A): FreeR[S, A] = FreeR(Pure[S, Val](cast(a)))
+  final def pure[S[_], A](a: A): FreeR[S, A] = FreeR0(Pure[S, Val](cast(a)))
 
-  final def suspend[S[_], A](s: S[FreeR[S, A]]): FreeR[S, A] = FreeR(Impure[S, Val](castK2[FreeR, S, A](s)))
+  final def suspend[S[_], A](s: S[FreeR[S, A]]): FreeR[S, A] = FreeR0(Impure[S, Val](castK2[FreeR, S, A](s)))
 
   final def bind[S[_], A, B](free: FreeR[S, A])(f: A => FreeR[S, B]): FreeR[S, B] =
-    FreeR(free.head, free.tail :+ Bind(x => castK1[FreeR, S, B](f(reify[A](x)))))
+    free match {
+      case FreeR0(h) => FreeR1(h, Bind(x => castK1[FreeR, S, B](f(reify[A](x)))))
+      case FreeR1(h, op) => FreeRs(h, Vector(op, Bind(x => castK1[FreeR, S, B](f(reify[A](x))))))
+      case FreeRs(h, t) => FreeRs(h, t :+ Bind(x => castK1[FreeR, S, B](f(reify[A](x)))))
+    }
 
   final def map[S[_], A, B](free: FreeR[S, A])(f: A => B): FreeR[S, B] =
-    FreeR(free.head, free.tail :+ Map(x => f(reify[A](x))))
+    free match {
+      case FreeR0(h) => FreeR1(h, Map(x => f(reify[A](x))))
+      case FreeR1(h, op) => FreeRs(h, Vector(op, Map(x => f(reify[A](x)))))
+      case FreeRs(h, t) => FreeRs(h, t :+ Map(x => f(reify[A](x))))
+    }
 
   /** Suspends a value within a functor lifting it to a Free */
   final def liftF[F[_], A](value: => F[A])(implicit F: Functor[F]): FreeR[F, A] =
     suspend[F, A](F.map(value)(pure _))
 
-  final def fromView[S[_], A](h: FreeView[S, A]): FreeR[S, A] = FreeR(castK1(h))
+  final def fromView[S[_], A](h: FreeView[S, A]): FreeR[S, A] = FreeR0(castK1(h))
 
   @tailrec
-  final def toView[S[_], A](h: FreeR[S, A])(implicit sf: Functor[S]): FreeView[S, A] = {
-    h.head match {
-      case Pure(x) =>
-        h.tail match {
-          case Vector() => Pure(reify[A](x))
-          case fh +: tailOps => fh match {
-            case Map(fmap) => toView(FreeR(Pure[S, Val](fmap(x)), tailOps))
-            case Bind(bind) =>
-              val fm = bind(x)
-              toView(FreeR(castK11[FreeView, S, Val](fm.head), fm.tail ++ tailOps))
-          }  
+  final def toView[S[_], A](f: FreeR[S, A])(implicit sf: Functor[S]): FreeView[S, A] = {
+    f match {
+      case FreeR0(h) => reifyK1[FreeView, S, A](h)
+
+      case FreeR1(h, op) => h match {
+        case Pure(x) => op match {
+          case Map(fmap) => Pure(reify[A](fmap(x)))
+          case Bind(bind) => toView(reifyK11[FreeR, S, A](bind(x)))
         }
 
-      case Impure(f) =>
-        Impure(sf.map(f){ fm =>
-          FreeR(fm.head, fm.tail ++ h.tail)
-        })
+        case Impure(f) =>
+          Impure(
+            sf.map(f){ fm =>
+              fm match {
+                case FreeR0(h) => FreeR1(h, op)
+                case FreeR1(h, op0) => FreeRs(h, Vector(op0, op))
+                case FreeRs(h, t) => FreeRs(h, t :+ op)
+              }
+          })
+          
+      }
+
+      case FreeRs(h, t) => h match {
+        case Pure(x) => t match {
+          case Vector() => Pure(reify[A](x))
+          case fh +: tailOps => fh match {
+            case Map(fmap) => toView(FreeRs(Pure[S, Val](fmap(x)), tailOps))
+            case Bind(bind) =>
+              val fm = castK11[FreeR, S, Val](bind(x))
+              fm match {
+                case FreeR0(h) => toView(FreeRs(h, tailOps))
+                case FreeR1(h, op0) => toView(FreeRs(h, op0 +: tailOps))
+                case FreeRs(h, t) => toView(FreeRs(h, t ++ tailOps))
+              }
+          }
+        }
+
+        case Impure(f) =>
+          Impure(
+            sf.map(f){ fm =>
+              fm match {
+                case FreeR0(h) => FreeRs(h, t)
+                case FreeR1(h, op0) => FreeRs(h, op0 +: t)
+                case FreeRs(h, t0) => FreeRs(h, t0 ++ t)
+              }
+          })
+      }
     }
+
   }
 
-  def mapFusion[S[_], A](h: FreeR[S, A])(implicit sf: Functor[S]): FreeR[S, A] =
-    h.head match {
-      case Pure(_) => FreeR(h.head, Ops.mapFusion(h.tail))
+  def mapFusion[S[_], A](f: FreeR[S, A])(implicit sf: Functor[S]): FreeR[S, A] =
+    f match {
+      case FreeR0(_) => f
 
-      case Impure(f) => FreeR(Impure(sf.map(f){
-        fm => FreeR(fm.head, Ops.mapFusion(fm.tail))
-      }), Ops.mapFusion(h.tail))
+      /*h match {
+        case Pure(_) => f
+
+        case Impure(f) => FreeR0(Impure(sf.map(f){
+          fm => fm match {
+            case FreeR0(h) => fm
+            case FreeR1(h, op0) => fm
+            case FreeRs(h, t) => FreeRs(h, Ops.mapFusion(t))
+          }
+        }))
+      }*/
+
+      case FreeR1(_, _) => f
+
+      /*h match {
+        case Pure(_) => f
+
+        case Impure(f) => FreeR1(Impure(sf.map(f){
+          fm => fm match {
+            case FreeR0(h) => fm
+            case FreeR1(h, op0) => fm
+            case FreeRs(h, t) => FreeRs(h, Ops.mapFusion(t))
+          }
+        }), op)
+      }*/
+
+      case FreeRs(h, t) => FreeRs(h, Ops.mapFusion(t))
+
+      /*h match {
+        case Pure(_) => FreeRs(h, Ops.mapFusion(t))
+
+        case Impure(_) => FreeRs(Impure(sf.map(f){
+          fm => fm match {
+            case FreeR0(h) => fm
+            case FreeR1(h, op0) => fm
+            case FreeRs(h, t) => FreeRs(h, Ops.mapFusion(t))
+          }
+        }))
+      }*/
     }
+
 
   type Ops = Vector[Op]
 
@@ -161,7 +245,7 @@ object FreeR {
               }
           }
         }
-      step(h.tail, None, Vector())
+      step(h, None, Vector())
     }
 
   }
@@ -172,6 +256,8 @@ object FreeR {
     // val unit: Val = cast(Unit)
     @inline def cast(x: Any): Val = x.asInstanceOf[Val]
     @inline def reify[A](x: Val): A = x.asInstanceOf[A]
+    @inline def reifyK1[F[_[_], _], G[_], A](x: F[G, Val]): F[G, A] = x.asInstanceOf[F[G, A]]
+    @inline def reifyK11[F[_[_], _], G[_], A](x: F[Any, Val]): F[G, A] = x.asInstanceOf[F[G, A]]
     @inline def reifyK2[F[_[_], _], G[_], A](x: G[F[G, Val]]): G[F[G, A]] = x.asInstanceOf[G[F[G, A]]]
 
     @inline def castK[F[_]](x: F[Any]): F[Val] = x.asInstanceOf[F[Val]]
@@ -202,9 +288,7 @@ object FreeR {
 
   implicit class TrampolineOps[A](val tr: Trampoline[A]) {
     /** Runs a trampoline all the way to the end, tail-recursively. */
-    def run: A = {
-      tr.go(_())
-    }
+    def run: A = tr.go(_())
   }
 
 }

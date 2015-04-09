@@ -2,13 +2,16 @@ package cats
 package tests
 
 import std.all._
+import cats.std.AllInstances
+import cats.syntax.AllSyntax
+
 import data._
 import free._
 import Free.Trampoline
+import scala.annotation.tailrec
 
-// the things we assert here are not so much important, what is
-// important is that this stuff compiles at all.
-class FreeTests extends CatsSuite {
+
+object FreeTools extends AllInstances with AllSyntax {
 
   def even[A](ns: List[A]): Trampoline[Boolean] =
     ns match {
@@ -68,6 +71,91 @@ class FreeTests extends CatsSuite {
     sb.toString()
   }
 
+  def ptime[A](f: => A): Double = {
+    val t0 = System.nanoTime
+    val ans = f
+    (System.nanoTime-t0)*1e-9
+  }
+
+  case class Get[I, A](f: I => A)
+
+  object Get {
+    implicit def F[I] = new Functor[({ type l[T] = Get[I, T]})#l] {
+      def map[A, B](a: Get[I, A])(f: A => B): Get[I, B] = Get[I, B](i => f(a.f(i)))
+    }
+  }
+
+  sealed abstract class FreeView[S[_], A] 
+
+  object FreeView {
+    case class Pure[S[_], A](a: A) extends FreeView[S, A]
+    case class Impure[S[_], A](a: S[Free[S, A]]) extends FreeView[S, A]
+  }
+
+  import FreeView._
+
+  def toView[S[_]: Functor, A](free: Free[S, A]): FreeView[S, A] = free.resume match {
+    case Right(a) => Pure(a)
+    case Left(s) => Impure(s)
+  }
+
+  def fromView[S[_], A](v: FreeView[S, A]): Free[S, A] = v match {
+    case Pure(a)    => Free.Pure(a)
+    case Impure(f)  => Free.Suspend(f)
+  }
+
+  type Iteratee[I, A] = Free[({ type l[T] = Get[I, T]})#l, A]
+
+  object Iteratee {
+    def get[I] : Iteratee[I, I] = {
+
+      type Get0[T] = ({ type l[a] = Get[I, a]})#l[T]
+
+      fromView[Get0, I](
+        Impure[Get0, I](
+          Get( (i:I) => Free.Pure(i) )
+        )
+      )
+    }
+
+    def addGet(i: Long): Iteratee[Long, Long] = {
+      get[Long] map { x => x + i }
+    }
+
+    def addNbad(n: Int): Iteratee[Long, Long] = {
+      //Seq.fill(n)(addGet _).foldLeft(M.point[Int](0)){ case (acc, f) => M.bind(acc)(f) }
+
+      @tailrec def step(i: Int, Iteratee: Iteratee[Long, Long]): Iteratee[Long, Long] = {
+        if(i < n) step(i+1, Iteratee.flatMap(addGet _)) else Iteratee
+      }
+
+      step(0, Free.Pure[({ type l[T] = Get[Long, T]})#l, Long](0))
+    }
+
+    def feedAll[I, A](Iteratee: Iteratee[I, A])(l: Seq[I]): Option[A] = {
+      @tailrec def step(Iteratee: Iteratee[I, A])(l: Seq[I]): Option[A] = {
+        toView[({ type l[T] = Get[I, T]})#l, A](Iteratee) match {
+          case t: Pure[({ type l[T] = Get[I, T]})#l, a]   => Some(t.a)
+          case t: Impure[({ type l[T] = Get[I, T]})#l, a] =>
+            l match {
+              case Nil    => None
+              case h +: l => step(t.a.f(h))(l)
+            }
+        }
+      }
+
+      step(Iteratee)(l)
+    }
+
+    def testQuadratic(n: Int) = feedAll (addNbad(n)) ((1 to n).map(_.toLong).toList)
+  }
+}
+
+// the things we assert here are not so much important, what is
+// important is that this stuff compiles at all.
+class FreeTests extends CatsSuite {
+  import FreeTools._
+
   test("Free Monoid is a list") {
     type FreeMonoid[A] = Free[({type λ[+α] = (A,α)})#λ, Unit]
 
@@ -106,6 +194,45 @@ class FreeTests extends CatsSuite {
   // }
 
   test("Free should support right binds") {
-    assert(testTime2("rgtBind 1000000")(rgtBind(1000000)(gen _).run) == 1000000)
+    val f = testTime2("rgtBind build 1000000")(rgtBind(1000000)(gen _))
+    val r = testTime2("rgtBind run 1000000")(f.run)
+    assert(r == 1000000)
+  }
+
+  test("Free should observe Iteratees in non quadratic complexity") {
+
+    var r = testTime2("Iteratee test 10000")(Iteratee.testQuadratic(10000))
+    assert(r == Some(50005000L))
+
+    r = testTime2("Iteratee test 20000")(Iteratee.testQuadratic(20000))
+    assert(r == Some(200010000L))
+
+    r = testTime2("Iteratee test 30000")(Iteratee.testQuadratic(30000))
+    assert(r == Some(450015000L))
+
+    r = testTime2("Iteratee test 40000")(Iteratee.testQuadratic(40000))
+    assert(r == Some(800020000L))
+
+    r = testTime2("Iteratee test 50000")(Iteratee.testQuadratic(50000))
+    assert(r == Some(1250025000L))
+
+    r = testTime2("Iteratee test 100000")(Iteratee.testQuadratic(100000))
+    assert(r == Some(5000050000L))
+
+
   }
 }
+
+/*
+    import cats.tests.FreeTools
+    import FreeTools.ptime
+    import com.quantifind.charts.Highcharts._
+
+    val l = List(100000, 200000, 300000, 400000, 500000, 1000000, 2000000, 5000000)
+    val p0 = l map { x => ptime(FreeTools.Iteratee.testQuadratic(x)) }
+    
+    val lft0 = l map { x => ptime(FreeTools.lftBind(x)(FreeTools.gen _).run) }
+    val rgt0 = l map { x => ptime(FreeTools.rgtBind(x)(FreeTools.gen _).run) }
+
+    line(l zip p0)
+*/

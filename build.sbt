@@ -137,6 +137,7 @@ lazy val data = project.dependsOn(macros, core)
 lazy val free = project.dependsOn(macros, core, std)
   .settings(moduleName := "cats-free")
   .settings(catsSettings)
+  .settings(libraryDependencies += "com.quantifind" %% "wisp" % "0.0.4")
 
 lazy val publishSettings = Seq(
   homepage := Some(url("https://github.com/non/cats")),
