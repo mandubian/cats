@@ -40,7 +40,6 @@ object FreeRTools extends AllInstances with AllSyntax {
     (1 to n).foldLeft(gen(n)){ case (acc, i) => gen(n-i) flatMap { _ => acc } }
   }
 
-  //(a flatMap (b flatMap (c flatMap (...))))
   def mapalot(n: Int): Trampoline[Long] = {
     (1 to n).foldLeft(Trampoline.done(0L)){ case (acc, i) => acc map { a => a + 1 } }
   }
@@ -236,7 +235,7 @@ class FreeRTests extends CatsSuite {
     val rgt1 = l map { x => ptime(FreeRTools.rgtBind(x)(FreeRTools.gen _).run) }
 
     val mfs = l map { x => 
-      val free = mapalot(x)
+      val free = FreeRTools.mapalot(x)
       val freeOpt = free.mapFusion
       ptime(free.run) -> ptime(freeOpt.run)
     }

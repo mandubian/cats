@@ -270,7 +270,6 @@ object FreeR {
   object Op {
     case class Map(f: Val => Val) extends Op
     case class Bind[S[_]](f: Val => FreeR[S, Val]) extends Op
-    // case class Apply(f: (Val, Val) => Val, left: Thunk, right: Thunk) extends Op
   }
 
   import cats.std.function._

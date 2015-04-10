@@ -36,6 +36,10 @@ object FreeTools extends AllInstances with AllSyntax {
     (1 to n).foldLeft(gen(n)){ case (acc, i) => gen(n-i) flatMap { _ => acc } }
   }
 
+  def mapalot(n: Int): Trampoline[Long] = {
+    (1 to n).foldLeft(Trampoline.done(0L)){ case (acc, i) => acc map { a => a + 1 } }
+  }
+
   def testTime2[A](name: String)(body: => A): A = {
     val t1 = System.currentTimeMillis()
     val r = body
@@ -227,6 +231,7 @@ class FreeTests extends CatsSuite {
     import cats.tests.FreeTools
     import FreeTools.ptime
     import com.quantifind.charts.Highcharts._
+    import cats.std.function._
 
     val l = List(100000, 200000, 300000, 400000, 500000, 1000000, 2000000, 5000000)
     val p0 = l map { x => ptime(FreeTools.Iteratee.testQuadratic(x)) }
@@ -235,4 +240,12 @@ class FreeTests extends CatsSuite {
     val rgt0 = l map { x => ptime(FreeTools.rgtBind(x)(FreeTools.gen _).run) }
 
     line(l zip p0)
-*/
+
+    val mfs0 = l map { x => 
+      val free = FreeTools.mapalot(x)
+      ptime(free.run)
+    }
+
+    line( l zip mfs )
+
+  */
